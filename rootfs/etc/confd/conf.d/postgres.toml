@@ -1,0 +1,7 @@
+[template]
+prefix = "/postgres"
+src = "postgresql.conf.tmpl"
+dest = "/var/lib/postgresql/postgresql.conf"
+keys = [
+  "maxconnections"
+]

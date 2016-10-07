@@ -1,0 +1,141 @@
+#!/bin/bash
+
+set -e
+
+declare -x PGDATA
+declare -x POSTGRES_MAXCONNECTIONS
+declare -x POSTGRES_INITDB_ARGS
+declare -x POSTGRES_USER
+declare -x POSTGRES_PASSWORD
+declare -x POSTGRES_DATABASE
+
+# defaults
+: ${PGDATA:="/var/lib/postgresql"}
+: ${POSTGRES_MAXCONNECTIONS:="100"}
+: ${POSTGRES_USER:="postgres"}
+: ${POSTGRES_DATABASE:=$POSTGRES_USER}
+
+setup() {
+  create_pg_data
+  if db_not_exists; then
+    init_db
+    configure_authentication
+    run_tmp_server
+    create_database
+    create_user
+    stop_tmp_server
+    copy_config
+  fi
+}
+
+create_pg_data() {
+  step "creating data dir"
+  run mkdir -p "$PGDATA"
+  run chmod 700 "$PGDATA"
+  run chown -R postgres "$PGDATA"
+}
+
+init_db() {
+  step "initialize db"
+  run su-exec postgres initdb ${POSTGRES_INITDB_ARGS}
+}
+
+configure_authentication() {
+  step "configure authentication"
+  { echo; echo "host all all 0.0.0.0/0 $(auth_method)"; } >> "$PGDATA/pg_hba.conf"
+}
+
+auth_method() {
+  if [ "$POSTGRES_PASSWORD" ]; then
+    echo "md5"
+  else
+    print_password_warning
+    echo "trust"
+  fi
+}
+
+create_database() {
+  step "creating database $POSTGRES_DATABASE"
+  if [ "$POSTGRES_DATABASE" != 'postgres' ]; then
+    run psql -v ON_ERROR_STOP=1 --username postgres <<-EOSQL
+      CREATE DATABASE "$POSTGRES_DATABASE" ;
+EOSQL
+  fi
+}
+
+create_user() {
+  step "creating user $POSTGRES_USER"
+  if [ "$POSTGRES_USER" = 'postgres' ]; then
+    op='ALTER'
+  else
+    op='CREATE'
+  fi
+  run psql -v ON_ERROR_STOP=1 --username postgres <<-EOSQL
+    $op USER "$POSTGRES_USER" WITH SUPERUSER $(password) ;
+EOSQL
+}
+
+password() {
+  if [ "$POSTGRES_PASSWORD" ]; then
+    echo "PASSWORD '$POSTGRES_PASSWORD'"
+  fi
+}
+
+run_tmp_server() {
+   step "start tmp server"
+   su-exec postgres pg_ctl -D "$PGDATA" \
+     -o "-c listen_addresses='localhost'" \
+     -w start
+}
+
+stop_tmp_server() {
+  step "shutdown tmp server"
+  su-exec postgres pg_ctl -D "$PGDATA" \
+    -m fast \
+    -w stop
+}
+
+print_password_warning() {
+  cat >&2 <<-'EOWARN'
+          ****************************************************
+          WARNING: No password has been set for the database.
+                   This will allow anyone with access to the
+                   Postgres port to access your database. In
+                   Docker's default configuration, this is
+                   effectively any other container on the same
+                   system.
+
+                   Use "-e POSTGRES_PASSWORD=password" to set
+                   it in "docker run".
+          ****************************************************
+EOWARN
+}
+
+copy_config() {
+  step "generate config"
+  run confd -onetime -backend env
+  chown postgres $PGDATA/postgresql.conf
+}
+
+db_not_exists() {
+  if [ -s "$PGDATA/PG_VERSION" ]; then
+    return 1
+  else
+    return 0
+  fi
+}
+
+#
+# Helper functions
+#
+step() {
+  echo "-----> $@"
+}
+
+run() {
+  "$@" 2>&1 | while read line; do
+    echo "       $line"
+  done
+}
+
+setup
